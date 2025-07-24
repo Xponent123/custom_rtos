@@ -11,6 +11,12 @@
 #define STACK_SIZE 32768 // 32KB stack
 #define STACK_CANARY 0xDEADBEEF // Stack overflow detection magic number
 
+// Task priorities (lower number = higher priority)
+#define PRIORITY_HIGH 0
+#define PRIORITY_NORMAL 1
+#define PRIORITY_LOW 2
+#define PRIORITY_IDLE 3
+
 // --- Type Definitions ---
 typedef enum
 {
@@ -24,6 +30,7 @@ typedef enum
 typedef struct TCB
 {
     uint32_t id;
+    uint32_t priority;         // Task priority (lower = higher priority)
     TaskState state;
     ucontext_t context;        // The correct struct for holding a context
     uint8_t stack[STACK_SIZE]; // Stack memory for the task; used by ucontext to store the task's execution stack
@@ -50,6 +57,7 @@ typedef struct qu{
 // --- Public API ---
 // extern TCB* current_task;
 int rtos_task_create(void (*task_function)(void));
+int rtos_task_create_with_priority(void (*task_function)(void), uint32_t priority);
 void rtos_task_yield(void);
 void rtos_task_delay(uint32_t ticks);
 void rtos_start(void);

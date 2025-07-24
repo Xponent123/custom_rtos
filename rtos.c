@@ -35,6 +35,24 @@ static void exit_critical_section()
     sigprocmask(SIG_UNBLOCK, &signal_mask, NULL);
 }
 
+// --- Task Cleanup Functions ---
+static void cleanup_terminated_task(TCB *tcb)
+{
+    // Clear sensitive data
+    memset(&tcb->context, 0, sizeof(ucontext_t));
+    
+    // Clear stack (security measure)
+    memset(tcb->stack, 0xDE, STACK_SIZE); // 0xDE = "dead" pattern
+    
+    // Reset TCB fields
+    tcb->state = TASK_TERMINATED;
+    tcb->delay_ticks = 0;
+    tcb->next = NULL;
+    tcb->stack_canary = 0; // Invalidate canary
+    
+    printf("Task %d resources cleaned up\n", tcb->id);
+}
+
 // --- Stack Canary Functions ---
 static void setup_stack_canary(TCB *tcb)
 {
@@ -76,6 +94,30 @@ static void enqueue(TCB **queue, TCB *tcb)
         }
         current->next = tcb;
     }
+}
+
+// Priority-based enqueue for ready queue (higher priority first)
+static void enqueue_priority(TCB **queue, TCB *tcb)
+{
+    tcb->next = NULL;
+    
+    // If queue is empty or tcb has higher priority than head
+    if (*queue == NULL || tcb->priority < (*queue)->priority)
+    {
+        tcb->next = *queue;
+        *queue = tcb;
+        return;
+    }
+    
+    // Find the correct position to insert
+    TCB *current = *queue;
+    while (current->next != NULL && current->next->priority <= tcb->priority)
+    {
+        current = current->next;
+    }
+    
+    tcb->next = current->next;
+    current->next = tcb;
 }
 
 static TCB *dequeue(TCB **queue)
@@ -149,7 +191,7 @@ void rtos_start(void)
                         prev->next = next;
                     }
                     ready_task->state = TASK_READY;
-                    enqueue(&ready_queue, ready_task);
+                    enqueue_priority(&ready_queue, ready_task); // Use priority queue
                     current = next;
                 }
                 else
@@ -188,12 +230,12 @@ void rtos_start(void)
                 if (yield_requested) {
                     // Task was preempted by timer, put it back in ready queue
                     current_task->state = TASK_READY;
-                    enqueue(&ready_queue, current_task);
+                    enqueue_priority(&ready_queue, current_task); // Use priority queue
                     yield_requested = 0;
                     printf("Task %d preempted by timer\n", current_task->id);
                 } else {
-                    // Task terminated normally
-                    current_task->state = TASK_TERMINATED;
+                    // Task terminated normally - clean up resources
+                    cleanup_terminated_task(current_task);
                     printf("Task %d has terminated.\n", current_task->id);
                     fflush(stdout);
                 }
@@ -209,12 +251,23 @@ void rtos_start(void)
     }
 }
 
-int rtos_task_create(void (*task_function)(void))
+int rtos_task_create_with_priority(void (*task_function)(void), uint32_t priority)
 {
+    // Parameter validation
+    if (task_function == NULL) {
+        fprintf(stderr, "Error: task_function cannot be NULL\n");
+        return -1;
+    }
+    
+    if (priority > PRIORITY_IDLE) {
+        fprintf(stderr, "Error: Invalid priority %u (max is %d)\n", priority, PRIORITY_IDLE);
+        return -1;
+    }
+    
     enter_critical_section();
     if (num_tasks >= MAX_TASKS)
     {
-        fprintf(stderr, "Error: Max tasks reached.\n");
+        fprintf(stderr, "Error: Max tasks reached (%d/%d)\n", num_tasks, MAX_TASKS);
         exit_critical_section();
         return -1;
     }
@@ -252,25 +305,35 @@ int rtos_task_create(void (*task_function)(void))
     makecontext(&new_tcb->context, (void (*)(void))task_function, 0);
 
     new_tcb->id = num_tasks++;
+    new_tcb->priority = priority;
     new_tcb->state = TASK_READY;
     new_tcb->delay_ticks = 0;
-    enqueue(&ready_queue, new_tcb);
+    enqueue_priority(&ready_queue, new_tcb); // Use priority queue
 
-    printf("Task %d created.\n", new_tcb->id);
+    printf("Task %d created with priority %u\n", new_tcb->id, priority);
     fflush(stdout);
 
     exit_critical_section();
-    return 0;
+    return new_tcb->id; // Return task ID instead of 0
+}
+
+int rtos_task_create(void (*task_function)(void))
+{
+    // Default to normal priority
+    return rtos_task_create_with_priority(task_function, PRIORITY_NORMAL);
 }
 
 void rtos_task_yield(void)
 {
-    if (current_task == NULL) return; // Safety check
+    if (current_task == NULL) {
+        fprintf(stderr, "Error: No current task to yield\n");
+        return; // Safety check
+    }
     
     enter_critical_section();
     TCB *yielding_task = current_task;
     yielding_task->state = TASK_READY;
-    enqueue(&ready_queue, yielding_task);
+    enqueue_priority(&ready_queue, yielding_task); // Use priority queue
     
     // Context switch with signals blocked
     swapcontext(&yielding_task->context, &scheduler_context);
@@ -279,7 +342,15 @@ void rtos_task_yield(void)
 
 void rtos_task_delay(uint32_t ticks)
 {
-    if (current_task == NULL) return; // Safety check
+    if (current_task == NULL) {
+        fprintf(stderr, "Error: No current task to delay\n");
+        return; // Safety check
+    }
+    
+    // Validate ticks parameter
+    if (ticks > 100000) { // Reasonable upper limit
+        fprintf(stderr, "Warning: Very large delay requested (%u ticks)\n", ticks);
+    }
     
     enter_critical_section();
     if (ticks == 0)
@@ -300,12 +371,36 @@ void rtos_task_delay(uint32_t ticks)
 
 void rtos_sem_init(rtos_semaphore_t *sem, int initial_value)
 {
+    // Parameter validation
+    if (sem == NULL) {
+        fprintf(stderr, "Error: Semaphore pointer cannot be NULL\n");
+        return;
+    }
+    
+    if (initial_value < 0) {
+        fprintf(stderr, "Error: Invalid semaphore initial value %d\n", initial_value);
+        return;
+    }
+    
+    enter_critical_section();
     sem->value = initial_value;
     sem->wait_queue = NULL;
+    exit_critical_section();
 }
 
 void rtos_sem_wait(rtos_semaphore_t *sem)
 {
+    // Parameter validation
+    if (sem == NULL) {
+        fprintf(stderr, "Error: Semaphore pointer cannot be NULL\n");
+        return;
+    }
+    
+    if (current_task == NULL) {
+        fprintf(stderr, "Error: No current task for semaphore wait\n");
+        return;
+    }
+    
     enter_critical_section();
     if (sem->value > 0)
     {
@@ -326,32 +421,62 @@ void rtos_sem_wait(rtos_semaphore_t *sem)
 
 void rtos_sem_post(rtos_semaphore_t *sem)
 {
+    // Parameter validation
+    if (sem == NULL) {
+        fprintf(stderr, "Error: Semaphore pointer cannot be NULL\n");
+        return;
+    }
+    
     enter_critical_section();
     if (sem->wait_queue != NULL)
     {
         TCB *unblocked_task = dequeue(&sem->wait_queue);
         unblocked_task->state = TASK_READY;
-        enqueue(&ready_queue, unblocked_task);
+        enqueue_priority(&ready_queue, unblocked_task); // Use priority queue
     }
     else
     {
         sem->value++;
+        // Prevent semaphore value overflow
+        if (sem->value > 1000) {
+            fprintf(stderr, "Warning: Semaphore value very high (%d)\n", sem->value);
+        }
     }
     exit_critical_section();
 }
 
 rtos_queue_t *rtos_queue_create(int msg_size, int capacity)
 {
+    // Parameter validation
+    if (msg_size <= 0 || msg_size > 65536) {
+        fprintf(stderr, "Error: Invalid message size %d (must be 1-65536)\n", msg_size);
+        return NULL;
+    }
+    
+    if (capacity <= 0 || capacity > 1000) {
+        fprintf(stderr, "Error: Invalid capacity %d (must be 1-1000)\n", capacity);
+        return NULL;
+    }
+    
+    // Check for potential overflow
+    size_t total_size = (size_t)msg_size * capacity;
+    if (total_size > SIZE_MAX / 2) {
+        fprintf(stderr, "Error: Queue size too large (%zu bytes)\n", total_size);
+        return NULL;
+    }
+    
     // Allocate memory OUTSIDE critical section to avoid blocking
     rtos_queue_t *queue = malloc(sizeof(rtos_queue_t));
     if (queue == NULL)
     {
+        fprintf(stderr, "Error: Failed to allocate queue structure\n");
         return NULL;
     }
 
-    queue->buffer = malloc(capacity * msg_size);
+    queue->buffer = malloc(total_size);
     if (queue->buffer == NULL)
     {
+        fprintf(stderr, "Error: Failed to allocate queue buffer (%zu bytes)\n", total_size);
         free(queue);
         return NULL;
     }
@@ -387,6 +512,17 @@ void rtos_queue_delete(rtos_queue_t *queue)
 
 void rtos_queue_send(rtos_queue_t *queue, const void *msg)
 {
+    // Parameter validation
+    if (queue == NULL) {
+        fprintf(stderr, "Error: Queue pointer cannot be NULL\n");
+        return;
+    }
+    
+    if (msg == NULL) {
+        fprintf(stderr, "Error: Message pointer cannot be NULL\n");
+        return;
+    }
+    
     rtos_sem_wait(&queue->sem_full);
     rtos_sem_wait(&queue->mutex);
 
@@ -401,6 +537,17 @@ void rtos_queue_send(rtos_queue_t *queue, const void *msg)
 
 void rtos_queue_receive(rtos_queue_t *queue, void *msg)
 {
+    // Parameter validation
+    if (queue == NULL) {
+        fprintf(stderr, "Error: Queue pointer cannot be NULL\n");
+        return;
+    }
+    
+    if (msg == NULL) {
+        fprintf(stderr, "Error: Message buffer cannot be NULL\n");
+        return;
+    }
+    
     rtos_sem_wait(&queue->sem_empty);
     rtos_sem_wait(&queue->mutex);
 
