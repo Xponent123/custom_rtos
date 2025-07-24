@@ -9,6 +9,7 @@
 // --- Constants ---
 #define MAX_TASKS 10
 #define STACK_SIZE 32768 // 32KB stack
+#define STACK_CANARY 0xDEADBEEF // Stack overflow detection magic number
 
 // --- Type Definitions ---
 typedef enum
@@ -26,6 +27,7 @@ typedef struct TCB
     TaskState state;
     ucontext_t context;        // The correct struct for holding a context
     uint8_t stack[STACK_SIZE]; // Stack memory for the task; used by ucontext to store the task's execution stack
+    uint32_t stack_canary;     // Stack overflow detection
     uint32_t delay_ticks;
     struct TCB *next;
 } TCB;

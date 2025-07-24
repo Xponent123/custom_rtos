@@ -35,6 +35,30 @@ static void exit_critical_section()
     sigprocmask(SIG_UNBLOCK, &signal_mask, NULL);
 }
 
+// --- Stack Canary Functions ---
+static void setup_stack_canary(TCB *tcb)
+{
+    tcb->stack_canary = STACK_CANARY;
+    // Place canary at the beginning of stack (lowest address)
+    uint32_t *stack_guard = (uint32_t *)tcb->stack;
+    *stack_guard = STACK_CANARY;
+}
+
+static int check_stack_canary(TCB *tcb)
+{
+    if (tcb->stack_canary != STACK_CANARY) {
+        return 0; // TCB canary corrupted
+    }
+    
+    // Check stack guard canary
+    uint32_t *stack_guard = (uint32_t *)tcb->stack;
+    if (*stack_guard != STACK_CANARY) {
+        return 0; // Stack canary corrupted
+    }
+    
+    return 1; // OK
+}
+
 // --- Helper Functions (enqueue, dequeue) ---
 static void enqueue(TCB **queue, TCB *tcb)
 {
@@ -68,16 +92,10 @@ static TCB *dequeue(TCB **queue)
 // --- Signal Handler for Preemption ---
 static void timer_handler(int signum)
 {
-    // Only set yield flag if we have a current task and we're not in critical section
+    // SAFE: Only set flag - no complex operations in signal handler
+    // This is async-signal-safe and prevents race conditions
     if (current_task != NULL && !in_critical_section) {
         yield_requested = 1;
-        // Force a context switch back to scheduler
-        // This is safe because we're setting up the context to return to scheduler
-        if (current_task->state == TASK_RUNNING) {
-            current_task->state = TASK_READY;
-            enqueue(&ready_queue, current_task);
-            swapcontext(&current_task->context, &scheduler_context);
-        }
     }
 }
 
@@ -152,16 +170,27 @@ void rtos_start(void)
             yield_requested = 0; // Reset yield flag
             exit_critical_section();
             
+            // Run the task
             swapcontext(&scheduler_context, &current_task->context);
             
             enter_critical_section();
             // Check if task terminated or was preempted
             if (current_task->state == TASK_RUNNING) {
+                // Check for stack overflow FIRST
+                if (!check_stack_canary(current_task)) {
+                    printf("FATAL: Stack overflow detected in Task %d!\n", current_task->id);
+                    fflush(stdout);
+                    current_task->state = TASK_TERMINATED;
+                    exit_critical_section();
+                    exit(1); // Fatal error - terminate program
+                }
+                
                 if (yield_requested) {
-                    // Task was preempted, put it back in ready queue
+                    // Task was preempted by timer, put it back in ready queue
                     current_task->state = TASK_READY;
                     enqueue(&ready_queue, current_task);
                     yield_requested = 0;
+                    printf("Task %d preempted by timer\n", current_task->id);
                 } else {
                     // Task terminated normally
                     current_task->state = TASK_TERMINATED;
@@ -169,6 +198,7 @@ void rtos_start(void)
                     fflush(stdout);
                 }
             }
+            // Note: If state is not TASK_RUNNING, task called yield or delay voluntarily
             exit_critical_section();
         }
         else
@@ -190,6 +220,10 @@ int rtos_task_create(void (*task_function)(void))
     }
 
     TCB *new_tcb = &tasks[num_tasks];
+    
+    // Initialize and setup stack canaries FIRST
+    setup_stack_canary(new_tcb);
+    
     if (getcontext(&new_tcb->context) == -1)
     {
         perror("getcontext failed");
@@ -198,9 +232,10 @@ int rtos_task_create(void (*task_function)(void))
     }
 
     // Properly align stack to 16-byte boundary
-    uintptr_t stack_start = (uintptr_t)new_tcb->stack;
+    // Reserve space for canary at start of stack
+    uintptr_t stack_start = (uintptr_t)new_tcb->stack + sizeof(uint32_t);
     uintptr_t aligned_stack_start = (stack_start + 15) & ~15UL;
-    size_t alignment_offset = aligned_stack_start - stack_start;
+    size_t alignment_offset = aligned_stack_start - (uintptr_t)new_tcb->stack;
     size_t aligned_stack_size = STACK_SIZE - alignment_offset;
     
     // Ensure minimum stack size after alignment
@@ -278,9 +313,13 @@ void rtos_sem_wait(rtos_semaphore_t *sem)
         exit_critical_section();
         return;
     }
+    
+    // Need to block - add to wait queue and context switch
     TCB *waiting_task = current_task;
     waiting_task->state = TASK_BLOCKED;
     enqueue(&sem->wait_queue, waiting_task);
+    
+    // Context switch while in critical section (signals blocked)
     swapcontext(&waiting_task->context, &scheduler_context);
     exit_critical_section();
 }
@@ -303,13 +342,10 @@ void rtos_sem_post(rtos_semaphore_t *sem)
 
 rtos_queue_t *rtos_queue_create(int msg_size, int capacity)
 {
-    // Since malloc can fail, it's not ideal inside a critical section,
-    // but for this project it's acceptable.
-    enter_critical_section();
+    // Allocate memory OUTSIDE critical section to avoid blocking
     rtos_queue_t *queue = malloc(sizeof(rtos_queue_t));
     if (queue == NULL)
     {
-        exit_critical_section();
         return NULL;
     }
 
@@ -317,10 +353,11 @@ rtos_queue_t *rtos_queue_create(int msg_size, int capacity)
     if (queue->buffer == NULL)
     {
         free(queue);
-        exit_critical_section();
         return NULL;
     }
 
+    // Now enter critical section for initialization
+    enter_critical_section();
     queue->head = 0;
     queue->tail = 0;
     queue->count = 0;
@@ -330,8 +367,8 @@ rtos_queue_t *rtos_queue_create(int msg_size, int capacity)
     rtos_sem_init(&queue->mutex, 1);
     rtos_sem_init(&queue->sem_full, capacity);
     rtos_sem_init(&queue->sem_empty, 0);
-
     exit_critical_section();
+
     return queue;
 }
 
