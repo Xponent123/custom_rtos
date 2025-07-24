@@ -5,7 +5,7 @@
 
 // --- Global Variables ---
 static TCB tasks[MAX_TASKS];
-static TCB* current_task = NULL;
+TCB* current_task = NULL;
 static int num_tasks = 0;
 static ucontext_t main_context; // Context for the scheduler itself
 
@@ -94,44 +94,40 @@ void rtos_start(void) {
     idle_loop();
 }
 
-void rtos_task_create(void (*task_function)(void)) {
-    if (num_tasks >= MAX_TASKS) return;
+int rtos_task_create(void (*task_function)(void)) {
+    // 1. Check if the task limit has been reached
+    if (num_tasks >= MAX_TASKS) {
+        fprintf(stderr, "Error: Maximum number of tasks reached.\n");
+        return -1; // Return an error code
+    }
 
     TCB* new_tcb = &tasks[num_tasks];
+    
+    // 2. Check the return value of getcontext()
+    if (getcontext(&new_tcb->context) == -1) {
+        perror("getcontext failed"); // perror prints our message + the system error
+        return -1;
+    }
+
+    // --- Stack Setup (Stays the same) ---
+    new_tcb->context.uc_stack.ss_sp = new_tcb->stack;
+    new_tcb->context.uc_stack.ss_size = STACK_SIZE;
+    new_tcb->context.uc_link = &main_context;
+
+    // --- Context Creation (Stays the same) ---
+    makecontext(&new_tcb->context, (void (*)(void))task_function, 0);
+
+    // --- Final TCB Initialization ---
     new_tcb->id = num_tasks++;
     new_tcb->state = TASK_READY;
     new_tcb->delay_ticks = 0;
-
-    // Get a starting context to modify
-    getcontext(&new_tcb->context);
-
-    // --- Definitive Stack Setup ---
-
-    // The user-provided stack alignment fix was excellent, but let's refine it slightly
-    // for maximum clarity and correctness with makecontext.
     
-    // 1. Set the stack pointer (ss_sp) to the beginning (lowest address) of our buffer.
-    //    makecontext() expects this convention.
-    new_tcb->context.uc_stack.ss_sp = new_tcb->stack;
-
-    // 2. Set the stack size. We must ensure the buffer size is a multiple of 16 for alignment.
-    //    We can simply guarantee this by making our STACK_SIZE constant a multiple of 16.
-    //    Let's assume STACK_SIZE is 8192 (which is a multiple of 16).
-    new_tcb->context.uc_stack.ss_size = STACK_SIZE;
-
-    // --- End of Fix ---
-
-    // Set the context to resume when this task's function returns
-    new_tcb->context.uc_link = &main_context;
-
-    // Prepare the context to execute the desired task function
-    makecontext(&new_tcb->context, (void (*)(void))task_function, 0);
-
     enqueue(&ready_queue, new_tcb);
     printf("Task %d created.\n", new_tcb->id);
     fflush(stdout);
+    
+    return 0; // Return 0 for success
 }
-
 void rtos_task_yield(void) {
     TCB* yielding_task = current_task;
     yielding_task->state = TASK_READY;
@@ -154,4 +150,39 @@ void rtos_task_delay(uint32_t ticks) {
 
     // Swap back to the scheduler's main context
     swapcontext(&delaying_task->context, &main_context);
+}
+
+// Add these three functions to the end of your rtos.c file
+
+void rtos_sem_init(rtos_semaphore_t* sem, int initial_value) {
+    sem->value = initial_value;
+    sem->wait_queue = NULL;
+}
+
+void rtos_sem_wait(rtos_semaphore_t* sem) {
+    // If the semaphore value is positive, decrement it and continue.
+    if (sem->value > 0) {
+        sem->value--;
+        return;
+    }
+
+    // If the semaphore value is zero, the task must block.
+    TCB* waiting_task = current_task;
+    waiting_task->state = TASK_BLOCKED;
+    enqueue(&sem->wait_queue, waiting_task);
+
+    // Switch context back to the scheduler to run another task.
+    swapcontext(&waiting_task->context, &main_context);
+}
+
+void rtos_sem_post(rtos_semaphore_t* sem) {
+    // Increment the semaphore value.
+    sem->value++;
+
+    // If there are tasks waiting, unblock one.
+    if (sem->wait_queue != NULL) {
+        TCB* unblocked_task = dequeue(&sem->wait_queue);
+        unblocked_task->state = TASK_READY;
+        enqueue(&ready_queue, unblocked_task);
+    }
 }

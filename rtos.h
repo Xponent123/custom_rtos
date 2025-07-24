@@ -15,7 +15,8 @@ typedef enum
 {
     TASK_READY,
     TASK_RUNNING,
-    TASK_SLEEPING
+    TASK_SLEEPING,
+    TASK_BLOCKED
 } TaskState;
 
 typedef struct TCB
@@ -28,10 +29,19 @@ typedef struct TCB
     struct TCB *next;
 } TCB;
 
+typedef struct semaphore{
+    int value;
+    TCB* wait_queue;
+}rtos_semaphore_t; 
 // --- Public API ---
-void rtos_start(void);
-void rtos_task_create(void (*task_function)(void));
+extern TCB* current_task;
+int rtos_task_create(void (*task_function)(void));
 void rtos_task_yield(void);
 void rtos_task_delay(uint32_t ticks);
+void rtos_start(void);
 
+
+void rtos_sem_init(rtos_semaphore_t* sem, int initial_value); 
+void rtos_sem_wait(rtos_semaphore_t* sem);                     
+void rtos_sem_post(rtos_semaphore_t* sem);  
 #endif // RTOS_H
