@@ -176,13 +176,94 @@ void rtos_sem_wait(rtos_semaphore_t* sem) {
 }
 
 void rtos_sem_post(rtos_semaphore_t* sem) {
-    // Increment the semaphore value.
-    sem->value++;
+    // Lock the scheduler or disable interrupts in a real kernel before this.
+    // For our simulation, this will be okay.
 
-    // If there are tasks waiting, unblock one.
+    // First, check if any task is waiting on this semaphore.
     if (sem->wait_queue != NULL) {
+        // A task is waiting. Unblock it by moving it to the ready queue.
+        // We do NOT increment sem->value. The "signal" is consumed immediately
+        // by the waiting task.
         TCB* unblocked_task = dequeue(&sem->wait_queue);
         unblocked_task->state = TASK_READY;
         enqueue(&ready_queue, unblocked_task);
+    } else {
+        // No tasks are waiting. Increment the semaphore value.
+        sem->value++;
     }
+}
+
+// Add these four functions to the end of rtos.c
+
+rtos_queue_t* rtos_queue_create(int msg_size, int capacity) {
+    // Allocate memory for the queue structure itself
+    rtos_queue_t* queue = malloc(sizeof(rtos_queue_t));
+    if (queue == NULL) {
+        return NULL;
+    }
+
+    // Allocate memory for the message buffer
+    queue->buffer = malloc(capacity * msg_size);
+    if (queue->buffer == NULL) {
+        free(queue); // Clean up if buffer allocation fails
+        return NULL;
+    }
+
+    // Initialize queue properties
+    queue->head = 0;
+    queue->tail = 0;
+    queue->count = 0;
+    queue->capacity = capacity;
+    queue->msg_size = msg_size;
+
+    // Initialize the three semaphores
+    rtos_sem_init(&queue->mutex, 1);             // Mutex for exclusive access
+    rtos_sem_init(&queue->sem_full, capacity);   // Tracks empty slots
+    rtos_sem_init(&queue->sem_empty, 0);         // Tracks used slots
+
+    return queue;
+}
+
+void rtos_queue_delete(rtos_queue_t* queue) {
+    if (queue == NULL) return;
+    free(queue->buffer);
+    free(queue);
+}
+
+void rtos_queue_send(rtos_queue_t* queue, const void* msg) {
+    rtos_sem_wait(&queue->sem_full);
+    rtos_sem_wait(&queue->mutex);
+
+    // --- Critical Section ---
+    void* target_addr = (uint8_t*)queue->buffer + (queue->tail * queue->msg_size);
+    memcpy(target_addr, msg, queue->msg_size);
+    
+    // --- DEBUG PRINT ---
+    // printf("  [Q SEND] head: %d, tail: %d, count: %d, wrote value: %d\n", queue->head, queue->tail, queue->count, *(int*)msg);
+    fflush(stdout);
+
+    queue->tail = (queue->tail + 1) % queue->capacity;
+    queue->count++;
+
+    rtos_sem_post(&queue->mutex);
+    rtos_sem_post(&queue->sem_empty);
+}
+
+void rtos_queue_receive(rtos_queue_t* queue, void* msg) {
+    rtos_sem_wait(&queue->sem_empty);
+    rtos_sem_wait(&queue->mutex);
+
+    // --- Critical Section ---
+    void* source_addr = (uint8_t*)queue->buffer + (queue->head * queue->msg_size);
+    memcpy(msg, source_addr, queue->msg_size);
+
+    // --- DEBUG PRINT ---
+    // printf("  [Q RECV] head: %d, tail: %d, count: %d, read value: %d\n", queue->head, queue->tail, queue->count, *(int*)msg);
+    fflush(stdout);
+
+    queue->head = (queue->head + 1) % queue->capacity;
+    queue->count--;
+
+    rtos_sem_post(&queue->mutex);
+    rtos_sem_post(&queue->sem_full);
 }

@@ -33,6 +33,17 @@ typedef struct semaphore{
     int value;
     TCB* wait_queue;
 }rtos_semaphore_t; 
+typedef struct qu{
+    void* buffer;
+    int head;
+    int tail;
+    int count;
+    int capacity;
+    int msg_size;
+    rtos_semaphore_t mutex;
+    rtos_semaphore_t sem_full;
+    rtos_semaphore_t sem_empty;
+} rtos_queue_t;
 // --- Public API ---
 extern TCB* current_task;
 int rtos_task_create(void (*task_function)(void));
@@ -44,4 +55,9 @@ void rtos_start(void);
 void rtos_sem_init(rtos_semaphore_t* sem, int initial_value); 
 void rtos_sem_wait(rtos_semaphore_t* sem);                     
 void rtos_sem_post(rtos_semaphore_t* sem);  
+
+rtos_queue_t* rtos_queue_create(int msg_size, int capacity);
+void rtos_queue_send(rtos_queue_t* queue, const void* msg);
+void rtos_queue_receive(rtos_queue_t* queue, void* msg);
+void rtos_queue_delete(rtos_queue_t* queue);
 #endif // RTOS_H

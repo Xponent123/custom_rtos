@@ -1,42 +1,64 @@
 #include "rtos.h"
 #include <stdio.h>
 
-// The shared resource
-static int g_shared_counter = 0;
-// The semaphore to protect the shared resource
-static rtos_semaphore_t g_counter_sem;
+// A global pointer for our message queue
+static rtos_queue_t* g_message_queue;
 
-void race_condition_task(void) {
-    while(1) {
-        // "Wait" for the semaphore before entering the critical section
-        rtos_sem_wait(&g_counter_sem);
-
-        // --- Start of Critical Section ---
-        int local_value = g_shared_counter;
-        // We can even yield now, and the data is still safe!
-        rtos_task_yield();
-        local_value++;
-        g_shared_counter = local_value;
-        // --- End of Critical Section ---
-
-        // "Post" the semaphore to release the lock
-        rtos_sem_post(&g_counter_sem);
-
-        printf("Task %d updated counter to: %d\n", current_task->id, g_shared_counter);
+// The Producer Task: Creates messages and sends them to the queue.
+void producer_task(void) {
+    int message_to_send = 0;
+    while (1) {
+        printf("Producer: Sending message %d\n", message_to_send);
         fflush(stdout);
-        rtos_task_delay(200);
+
+        // Send the message to the queue.
+        // This will block if the queue is full.
+        rtos_queue_send(g_message_queue, &message_to_send);
+
+        message_to_send++;
+
+        // Wait before producing the next message
+        rtos_task_delay(500);
+    }
+}
+
+// The Consumer Task: Waits for messages and processes them.
+void consumer_task(void) {
+    int received_message;
+    while (1) {
+        printf("Consumer: Waiting for a message...\n");
+        fflush(stdout);
+
+        // Receive a message from the queue.
+        // This will block if the queue is empty.
+        rtos_queue_receive(g_message_queue, &received_message);
+
+        printf("Consumer: Received message %d\n", received_message);
+        fflush(stdout);
     }
 }
 
 int main() {
-    printf("--- Running Race Condition Test (FIXED) ---\n");
+    printf("--- Running Message Queue Test ---\n");
 
-    // Initialize the semaphore with a value of 1 (making it a mutex)
-    rtos_sem_init(&g_counter_sem, 1);
+    // Create a queue that can hold 5 messages of type int.
+    g_message_queue = rtos_queue_create(sizeof(int), 5);
 
-    rtos_task_create(race_condition_task);
-    rtos_task_create(race_condition_task);
+    if (g_message_queue == NULL) {
+        fprintf(stderr, "Failed to create message queue.\n");
+        return -1;
+    }
 
+    // Create the producer and consumer tasks
+    rtos_task_create(producer_task);
+    rtos_task_create(consumer_task);
+
+    // Start the RTOS
     rtos_start();
+
+    // The program should not reach here.
+    // In a real application, you might delete the queue on exit.
+    rtos_queue_delete(g_message_queue);
+
     return 0;
 }
