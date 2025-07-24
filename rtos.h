@@ -45,7 +45,7 @@ typedef struct qu{
     rtos_semaphore_t sem_empty;
 } rtos_queue_t;
 // --- Public API ---
-extern TCB* current_task;
+// extern TCB* current_task;
 int rtos_task_create(void (*task_function)(void));
 void rtos_task_yield(void);
 void rtos_task_delay(uint32_t ticks);
