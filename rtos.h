@@ -8,7 +8,7 @@
 
 // --- Constants ---
 #define MAX_TASKS 10
-#define STACK_SIZE 8192 // 8KB stack
+#define STACK_SIZE 32768 // 32KB stack
 
 // --- Type Definitions ---
 typedef enum
@@ -16,6 +16,7 @@ typedef enum
     TASK_READY,
     TASK_RUNNING,
     TASK_SLEEPING,
+    TASK_TERMINATED,
     TASK_BLOCKED
 } TaskState;
 
